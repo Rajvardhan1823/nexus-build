@@ -48,10 +48,12 @@ create table public.listings (
   updated_at timestamptz not null default now(),
   unique (source, source_url)
 );
-grant select on public.listings to authenticated;
+grant select, insert, update on public.listings to authenticated;
 grant all on public.listings to service_role;
 alter table public.listings enable row level security;
 create policy "Signed in users can browse listings" on public.listings for select to authenticated using (true);
+create policy "Authenticated users can add listings" on public.listings for insert to authenticated with check (true);
+create policy "Authenticated users can update listings" on public.listings for update to authenticated using (true) with check (true);
 
 create table public.matches (
   id uuid primary key default gen_random_uuid(),
@@ -85,19 +87,6 @@ grant all on public.shortlist_items to service_role;
 alter table public.shortlist_items enable row level security;
 create policy "Users manage their own shortlist" on public.shortlist_items for all to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
 
-create table public.agent_conversations (
-  id uuid primary key default gen_random_uuid(),
-  user_id uuid not null,
-  title text not null default 'Nexus session',
-  messages jsonb not null default '[]'::jsonb,
-  created_at timestamptz not null default now(),
-  updated_at timestamptz not null default now()
-);
-grant select, insert, update, delete on public.agent_conversations to authenticated;
-grant all on public.agent_conversations to service_role;
-alter table public.agent_conversations enable row level security;
-create policy "Users manage their own conversations" on public.agent_conversations for all to authenticated using (auth.uid() = user_id) with check (auth.uid() = user_id);
-
 create table public.action_jobs (
   id uuid primary key default gen_random_uuid(),
   user_id uuid not null,
@@ -124,5 +113,4 @@ create trigger resumes_updated_at before update on public.resumes for each row e
 create trigger listings_updated_at before update on public.listings for each row execute function public.update_updated_at_column();
 create trigger matches_updated_at before update on public.matches for each row execute function public.update_updated_at_column();
 create trigger shortlist_items_updated_at before update on public.shortlist_items for each row execute function public.update_updated_at_column();
-create trigger agent_conversations_updated_at before update on public.agent_conversations for each row execute function public.update_updated_at_column();
 create trigger action_jobs_updated_at before update on public.action_jobs for each row execute function public.update_updated_at_column();
