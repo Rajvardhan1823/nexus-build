@@ -8,13 +8,11 @@ import {
   ChevronDown,
   CircleAlert,
   FileText,
-  Github,
   Heart,
   Inbox,
   LayoutDashboard,
   LogOut,
   Menu,
-  MessageSquareText,
   Plus,
   RefreshCw,
   Search,
@@ -24,18 +22,16 @@ import {
   Upload,
   UserRound,
   X,
-  Zap,
 } from "lucide-react";
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
+import pdfWorkerUrl from "pdfjs-dist/build/pdf.worker.min.mjs?url";
 
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { lovable } from "@/integrations/lovable";
 import { supabase } from "@/integrations/supabase/client";
 import type { Database } from "@/integrations/supabase/types";
 
-import logoAsset from "@/assets/nexus-logo.png.asset.json";
 
 export const Route = createFileRoute("/")({
   head: () => ({
@@ -63,6 +59,7 @@ type Match = Database["public"]["Tables"]["matches"]["Row"];
 type Shortlist = Database["public"]["Tables"]["shortlist_items"]["Row"];
 type Job = Database["public"]["Tables"]["action_jobs"]["Row"];
 type User = { id: string; email?: string | null; user_metadata?: Record<string, unknown> };
+type ChatMessage = { id: string; role: "user" | "assistant"; content: string; createdAt: string };
 
 type WorkspaceData = {
   listings: Listing[];
@@ -128,10 +125,12 @@ function Index() {
     ]);
     const error = [listings, resumes, matches, shortlist, jobs].find((result) => result.error)?.error;
     if (error) setNotice(error.message);
+    const remoteListings = listings.data ?? [];
+    const localListings = getLocalListings(user.id);
     setData({
-      listings: listings.data ?? [],
-      resumes: resumes.data ?? [],
-      matches: matches.data ?? [],
+      listings: [...localListings, ...remoteListings.filter((listing) => !localListings.some((local) => local.source_url === listing.source_url))],
+      resumes: [...getLocalResumes(user.id), ...(resumes.data ?? []).filter((resume) => !getLocalResumes(user.id).some((local) => local.file_name === resume.file_name && local.extracted_text === resume.extracted_text))],
+      matches: [...(matches.data ?? []), ...getLocalMatches(user.id)],
       shortlist: shortlist.data ?? [],
       jobs: jobs.data ?? [],
     });
@@ -151,7 +150,7 @@ function Index() {
   const visibleListings = data.listings.filter((listing) => {
     const haystack = `${listing.title} ${listing.company} ${listing.location ?? ""} ${listing.required_skills.join(" ")}`.toLowerCase();
     return haystack.includes(search.toLowerCase());
-  });
+  }).sort((a, b) => (matchByListing.get(b.id)?.score ?? 0) - (matchByListing.get(a.id)?.score ?? 0));
   const activity = [...data.jobs, ...data.listings.map((listing) => ({ ...listing, job_type: "listing", status: listing.extraction_status, created_at: listing.created_at, id: listing.id }))]
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .slice(0, 6);
@@ -159,9 +158,6 @@ function Index() {
   return (
     <div className="nexus-app min-h-screen bg-background text-foreground">
       <aside className="nexus-rail hidden w-[76px] shrink-0 flex-col items-center border-r border-border bg-surface/70 py-6 lg:flex">
-        <button className="mb-10 cursor-pointer" onClick={() => setActiveView("overview")} aria-label="Go to overview">
-          <img src={logoAsset.url} alt="Nexus" className="size-10 rounded-xl object-cover shadow-lg shadow-primary/20" />
-        </button>
         <nav className="flex flex-col gap-4" aria-label="Primary navigation">
           {navItems.map((item) => {
             const Icon = item.icon;
@@ -195,8 +191,6 @@ function Index() {
             <Menu />
           </button>
           <div className="flex min-w-0 flex-1 items-center gap-3 text-muted-foreground">
-            <span className="hidden font-mono text-xs opacity-60 sm:inline">$ nexus</span>
-            <span className="hidden h-4 w-px bg-border sm:inline" />
             <Search className="size-4 shrink-0" />
             <Input
               value={search}
@@ -220,13 +214,14 @@ function Index() {
                   <h1 className="mt-2 text-2xl font-semibold tracking-tight sm:text-3xl">Good to see you, {displayName.split(" ")[0]}.</h1>
                   <p className="mt-2 max-w-xl text-sm leading-6 text-muted-foreground">Your private workspace for finding the next role worth your time.</p>
                 </div>
-                <Button onClick={() => setShowIngest(true)} className="gap-2"><Plus /> Add listing</Button>
+                {activeView === "overview" && <Button onClick={() => setShowIngest(true)} className="gap-2"><Plus /> Add listing</Button>}
               </div>
 
               <OverviewStats data={data} />
+              {activeView === "overview" && <AssistantPanel userId={user.id} data={data} onNotice={setNotice} />}
 
               {activeView === "resume" ? (
-                <ResumePanel user={user} resumes={data.resumes} onRefresh={loadData} onNotice={setNotice} />
+                <ResumePanel user={user} resumes={data.resumes} listings={data.listings} onRefresh={loadData} onNotice={setNotice} />
               ) : activeView === "shortlist" ? (
                 <ListingStream
                   title="Your shortlist"
@@ -243,7 +238,7 @@ function Index() {
               ) : activeView === "matches" ? (
                 <ListingStream
                   title="Best matches"
-                  listings={visibleListings.sort((a, b) => (matchByListing.get(b.id)?.score ?? 0) - (matchByListing.get(a.id)?.score ?? 0))}
+                  listings={visibleListings}
                   matchByListing={matchByListing}
                   shortlistIds={shortlistIds}
                   onToggleShortlist={async (listingId) => {
@@ -280,13 +275,11 @@ function Index() {
               )}
             </div>
           </section>
-
-          <AssistantPanel user={user} data={data} onNotice={setNotice} />
         </div>
       </main>
 
-      {showIngest && <IngestDialog user={user} resume={data.resumes[0]} onClose={() => setShowIngest(false)} onComplete={async () => { setShowIngest(false); await loadData(); }} onNotice={setNotice} />}
-      {showProfile && <ProfileDialog user={user} onClose={() => setShowProfile(false)} onSignedOut={() => setUser(null)} />}
+      {showIngest && <IngestDialog user={user} resumes={data.resumes} onClose={() => setShowIngest(false)} onComplete={async () => { setShowIngest(false); await loadData(); }} onNotice={setNotice} />}
+      {showProfile && <ProfileDialog user={user} onClose={() => setShowProfile(false)} onUpdated={setUser} onSignedOut={() => setUser(null)} />}
       {notice && <Notice message={notice} onClose={() => setNotice(null)} />}
     </div>
   );
@@ -322,76 +315,234 @@ function ActivityRow({ item }: { item: Job | (Listing & { job_type: string; stat
 
 function EmptyActivity({ onAdd }: { onAdd: () => void }) { return <div className="nexus-empty"><Activity className="size-6 text-primary" /><h3>No activity yet</h3><p>Your normalized listings, matches, and action jobs will appear here.</p><Button variant="outline" size="sm" onClick={onAdd}><Plus /> Add your first listing</Button></div>; }
 
-function ResumePanel({ user, resumes, onRefresh, onNotice }: { user: User; resumes: Resume[]; onRefresh: () => Promise<void>; onNotice: (message: string) => void }) {
+function ResumePanel({ user, resumes, listings, onRefresh, onNotice }: { user: User; resumes: Resume[]; listings: Listing[]; onRefresh: () => Promise<void>; onNotice: (message: string) => void }) {
   const [uploading, setUploading] = useState(false);
-  const upload = async (file: File) => {
-    if (!file.type.startsWith("text/") && !/[.](txt|md|rtf)$/i.test(file.name)) { onNotice("For reliable extraction, upload a .txt, .md, or .rtf resume file."); return; }
+  const scoreExistingResume = async (resume: Resume) => {
+    if (!listings.length) { onNotice("Add a listing before scoring this resume."); return; }
     setUploading(true);
-    const path = `${user.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
-    const text = (await file.text()).slice(0, 30000);
-    const uploadResult = await supabase.storage.from("resumes").upload(path, file, { upsert: true });
-    if (uploadResult.error) { onNotice(uploadResult.error.message); setUploading(false); return; }
-    const insertResult = await supabase.from("resumes").insert({ user_id: user.id, file_name: file.name, storage_path: path, extracted_text: text, processing_status: "ready" });
-    if (insertResult.error) onNotice(insertResult.error.message); else onNotice("Resume uploaded. Add listings to score them against it.");
+    const response = await fetch("/api/groq", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "score_listings", resumeText: resume.extracted_text, context: listings }) });
+    const payload = await response.json().catch(() => ({}));
+    const scores = Array.isArray(payload.scores) ? payload.scores as Array<{ score?: number; explanation?: string }> : [];
+    scores.forEach((score, index) => { if (listings[index]) saveLocalMatch(user.id, resume.id, listings[index].id, score); });
+    onNotice(response.ok ? `${scores.length} opportunit${scores.length === 1 ? "y was" : "ies were"} scored with ${resume.file_name}.` : payload.error ?? "The listings could not be scored yet.");
     setUploading(false);
     await onRefresh();
   };
-  return <section className="nexus-panel space-y-5"><div><p className="nexus-eyebrow">Profile signal</p><h2 className="mt-2 text-lg font-semibold">Your resume</h2><p className="mt-1 text-sm text-muted-foreground">Nexus uses your extracted resume text to explain why a role fits.</p></div><label className="nexus-upload"><Upload className="size-5 text-primary" /><span>{uploading ? "Uploading..." : "Choose a .txt, .md, or .rtf resume"}</span><input type="file" accept=".txt,.md,.rtf,text/plain" className="sr-only" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} /></label>{resumes.length === 0 ? <div className="nexus-empty py-8"><FileText className="size-5 text-muted-foreground" /><p>No resume uploaded yet.</p></div> : resumes.map((resume) => <div key={resume.id} className="flex items-center gap-3 border-t border-border pt-4"><FileText className="size-4 text-primary" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{resume.file_name}</p><p className="text-xs text-muted-foreground">{resume.processing_status} · {formatDate(resume.created_at)}</p></div><Check className="size-4 text-emerald-400" /></div>)}</section>;
+  const upload = async (file: File) => {
+    const isPdf = file.type === "application/pdf" || /\.pdf$/i.test(file.name);
+    if (!isPdf && !file.type.startsWith("text/") && !/[.](txt|md|rtf)$/i.test(file.name)) { onNotice("Upload a PDF, TXT, Markdown, or RTF resume file."); return; }
+    setUploading(true);
+    const path = `${user.id}/${Date.now()}-${file.name.replace(/[^a-zA-Z0-9._-]/g, "-")}`;
+    let text: string;
+    try {
+      text = isPdf ? await extractPdfText(file) : (await file.text()).slice(0, 30000);
+    } catch (error) {
+      onNotice(error instanceof Error ? error.message : "The PDF could not be read.");
+      setUploading(false);
+      return;
+    }
+    if (!text.trim()) { onNotice("No readable text was found in that file. Please upload a text-based PDF or a text resume."); setUploading(false); return; }
+    const localResume = saveLocalResume(user.id, file.name, path, text);
+    const uploadResult = await supabase.storage.from("resumes").upload(path, file, { upsert: true });
+    const insertResult = uploadResult.error ? { error: uploadResult.error } : await supabase.from("resumes").insert({ user_id: user.id, file_name: file.name, storage_path: path, extracted_text: text, processing_status: "ready" });
+    if (listings.length) {
+      const scoreResponse = await fetch("/api/groq", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "score_listings", resumeText: text, context: listings }) });
+      const scorePayload = await scoreResponse.json().catch(() => ({}));
+      const scores = Array.isArray(scorePayload.scores) ? scorePayload.scores as Array<{ score?: number; explanation?: string }> : [];
+      scores.forEach((score, index) => { if (listings[index]) saveLocalMatch(user.id, localResume.id, listings[index].id, score); });
+      if (!scoreResponse.ok) onNotice(scorePayload.error ?? "Resume was saved, but existing listings could not be scored yet.");
+      else onNotice(`${insertResult.error ? "Resume extracted and saved locally" : "Resume uploaded"}. ${scores.length} existing opportunit${scores.length === 1 ? "y was" : "ies were"} scored.`);
+    } else if (insertResult.error) onNotice("Resume extracted and saved locally. It is ready for scoring."); else onNotice("Resume uploaded. Add listings to score them against it.");
+    setUploading(false);
+    await onRefresh();
+  };
+  return <section className="nexus-panel space-y-5"><div><p className="nexus-eyebrow">Profile signal</p><h2 className="mt-2 text-lg font-semibold">Your resume</h2><p className="mt-1 text-sm text-muted-foreground">Nexus extracts text from PDFs and text files to explain why a role fits.</p></div><label className="nexus-upload"><Upload className="size-5 text-primary" /><span>{uploading ? "Uploading..." : "Choose a PDF or text resume"}</span><input type="file" accept=".pdf,.txt,.md,.rtf,application/pdf,text/plain,text/markdown,application/rtf" className="sr-only" onChange={(event) => { const file = event.target.files?.[0]; if (file) void upload(file); }} /></label>{resumes.length === 0 ? <div className="nexus-empty py-8"><FileText className="size-5 text-muted-foreground" /><p>No resume uploaded yet.</p></div> : resumes.map((resume) => <div key={resume.id} className="flex items-center gap-3 border-t border-border pt-4"><FileText className="size-4 text-primary" /><div className="min-w-0 flex-1"><p className="truncate text-sm font-medium">{resume.file_name}</p><p className="text-xs text-muted-foreground">{resume.processing_status} · {formatDate(resume.created_at)}</p></div><Button variant="outline" size="sm" onClick={() => void scoreExistingResume(resume)} disabled={uploading}>Score jobs</Button><Check className="size-4 text-emerald-400" /></div>)}</section>;
 }
 
-function AssistantPanel({ user, data, onNotice }: { user: User; data: WorkspaceData; onNotice: (message: string) => void }) {
+function AssistantPanel({ userId, data, onNotice }: { userId: string; data: WorkspaceData; onNotice: (message: string) => void }) {
   const [question, setQuestion] = useState("");
-  const [answer, setAnswer] = useState<string | null>(null);
-  const [trace, setTrace] = useState<string | null>(null);
+  const [history, setHistory] = useState<ChatMessage[]>(() => getChatHistory(userId));
   const [asking, setAsking] = useState(false);
+  useEffect(() => { setHistory(getChatHistory(userId)); }, [userId]);
+  const updateHistory = (next: ChatMessage[]) => { setHistory(next); saveChatHistory(userId, next); };
   const ask = async () => {
     if (!question.trim()) return;
-    setAsking(true); setTrace("Querying your private workspace...");
-    const response = await fetch("/api/groq", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "chat", question, context: { listings: data.listings.slice(0, 40), matches: data.matches, shortlist: data.shortlist } }) });
+    const submittedQuestion = question.trim();
+    const userMessage: ChatMessage = { id: crypto.randomUUID(), role: "user", content: submittedQuestion, createdAt: new Date().toISOString() };
+    const nextHistory = [...history, userMessage];
+    updateHistory(nextHistory);
+    setQuestion("");
+    setAsking(true);
+    const resumeContext = data.resumes.slice(0, 3).map((resume) => ({ fileName: resume.file_name, extractedText: resume.extracted_text.slice(0, 14000) }));
+    const response = await fetch("/api/groq", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "chat", question: submittedQuestion, context: { resumes: resumeContext, listings: data.listings.slice(0, 30), matches: data.matches.slice(0, 50), shortlist: data.shortlist, conversation: nextHistory.slice(-8).map(({ role, content }) => ({ role, content })) } }) });
     const payload = await response.json().catch(() => ({}));
-    if (!response.ok) onNotice(payload.error ?? "The assistant could not answer right now."); else setAnswer(payload.answer);
-    setTrace(response.ok ? "Answered from the records currently in your workspace." : null); setAsking(false);
+    if (!response.ok) {
+      const answer = payload.error ?? "The assistant could not answer right now.";
+      onNotice(answer);
+      updateHistory([...nextHistory, { id: crypto.randomUUID(), role: "assistant", content: answer, createdAt: new Date().toISOString() }]);
+    } else if (typeof payload.answer === "string") {
+      updateHistory([...nextHistory, { id: crypto.randomUUID(), role: "assistant", content: payload.answer, createdAt: new Date().toISOString() }]);
+    }
+    setAsking(false);
   };
-  return <aside className="nexus-assistant w-full shrink-0 border-t border-border xl:w-[340px] xl:border-l xl:border-t-0"><div className="flex items-center justify-between border-b border-border px-5 py-5"><div><p className="nexus-eyebrow">Workspace agent</p><h2 className="mt-1 text-sm font-bold uppercase tracking-widest">Nexus AI</h2></div><span className="nexus-live-dot" /></div><div className="flex flex-1 flex-col gap-5 p-5"><div className="space-y-2"><div className="font-mono text-[11px] text-primary">[context]</div><div className="nexus-message">{data.listings.length ? `I can search ${data.listings.length} listing${data.listings.length === 1 ? "" : "s"}, ${data.matches.length} match${data.matches.length === 1 ? "" : "es"}, and your shortlist.` : "Upload a resume and add listings, then ask me questions about your opportunities."}</div></div>{answer && <div className="space-y-2"><div className="font-mono text-[11px] text-accent">[response]</div><div className="text-sm leading-6 text-foreground">{answer}</div></div>}{trace && <div className="font-mono text-[10px] uppercase tracking-widest text-muted-foreground">{trace}</div>}<div className="mt-auto rounded-xl border border-primary/15 bg-primary/5 p-4"><p className="nexus-eyebrow">Try asking</p><button className="mt-2 text-left text-xs italic text-foreground" onClick={() => setQuestion("Which saved roles should I prioritize this week?")}>“Which saved roles should I prioritize this week?”</button></div></div><div className="border-t border-border p-4"><div className="flex items-end gap-2 rounded-lg border border-border bg-background p-2 focus-within:border-primary/50"><Textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void ask(); } }} placeholder="Ask about your roles..." rows={2} className="min-h-0 resize-none border-0 bg-transparent p-1 text-xs shadow-none focus-visible:ring-0" /><Button size="icon" onClick={() => void ask()} disabled={asking || !question.trim()} aria-label="Ask Nexus" title="Ask Nexus"><Send /></Button></div></div></aside>;
+  return <aside className="nexus-assistant w-full rounded-xl border border-border bg-surface/40"><div className="border-b border-border px-5 py-5"><p className="nexus-eyebrow">Career assistant</p><h2 className="mt-1 text-sm font-bold uppercase tracking-widest">Nexus AI</h2></div><div className="flex flex-1 flex-col gap-4 p-5"><div className="nexus-message">{data.resumes.length ? `Using ${data.resumes[0].file_name} and your extracted opportunities.` : "Upload a resume and extract a jobs page, then ask about your opportunities."}</div>{history.map((message) => <div key={message.id} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-xl bg-primary px-4 py-3 text-sm text-primary-foreground" : "max-w-[95%] rounded-xl border border-primary/15 bg-primary/5 p-4 text-sm leading-6 text-foreground"}>{message.content}</div>)}{asking && <div className="flex items-center gap-3 rounded-xl border border-primary/15 bg-primary/5 p-4 text-sm text-primary"><RefreshCw className="size-4 animate-spin" /> Thinking…</div>}{history.length === 0 && <div className="rounded-xl border border-primary/15 bg-primary/5 p-4"><p className="nexus-eyebrow">Try asking</p><button className="mt-2 text-left text-xs italic text-foreground" onClick={() => setQuestion("Which roles should I prioritize based on my resume?")}>“Which roles should I prioritize based on my resume?”</button></div>}</div><div className="border-t border-border p-4"><div className="flex items-end gap-2 rounded-lg border border-border bg-background p-2 focus-within:border-primary/50"><Textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void ask(); } }} placeholder="Ask about your resume or jobs..." rows={2} className="min-h-0 resize-none border-0 bg-transparent p-1 text-xs shadow-none focus-visible:ring-0" /><Button size="icon" onClick={() => void ask()} disabled={asking || !question.trim()} aria-label="Ask Nexus" title="Ask Nexus"><Send /></Button></div></div></aside>;
 }
 
-function IngestDialog({ user, resume, onClose, onComplete, onNotice }: { user: User; resume?: Resume; onClose: () => void; onComplete: () => Promise<void>; onNotice: (message: string) => void }) {
+function IngestDialog({ user, resumes, onClose, onComplete, onNotice }: { user: User; resumes: Resume[]; onClose: () => void; onComplete: () => Promise<void>; onNotice: (message: string) => void }) {
   const [url, setUrl] = useState("");
+  const [resumeId, setResumeId] = useState(resumes[0]?.id ?? "");
   const [busy, setBusy] = useState(false);
   const ingest = async () => {
     if (!url.trim()) return;
     setBusy(true);
+    const resume = resumes.find((item) => item.id === resumeId);
     const response = await fetch("/api/groq", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "ingest_listing", url: url.trim(), resumeText: resume?.extracted_text ?? "" }) });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) { onNotice(payload.error ?? "That listing could not be processed."); setBusy(false); return; }
-    const listing = payload.listing as Database["public"]["Tables"]["listings"]["Insert"];
-    const inserted = await supabase.from("listings").upsert({ ...listing, source_url: url.trim(), source: listing.source || "manual" }, { onConflict: "source,source_url" }).select().single();
-    if (inserted.error || !inserted.data) { onNotice(inserted.error?.message ?? "The listing was not saved."); setBusy(false); return; }
-    if (resume) {
-      await supabase.from("matches").upsert({ user_id: user.id, resume_id: resume.id, listing_id: inserted.data.id, score: payload.score ?? 0, explanation: payload.explanation ?? null }, { onConflict: "user_id,resume_id,listing_id" });
+    const listings = payload.listings as Database["public"]["Tables"]["listings"]["Insert"][];
+    const scores = (payload.scores as Array<{ score?: number; explanation?: string }>) ?? [];
+    if (!Array.isArray(listings) || listings.length === 0) { onNotice("No opportunities were found on that page."); setBusy(false); return; }
+    let savedCount = 0;
+    let localCount = 0;
+    for (const [index, listing] of listings.entries()) {
+      const sourceUrl = `${url.trim()}#nexus-opportunity-${index + 1}`;
+      const inserted = await supabase.from("listings").upsert({ ...listing, source_url: sourceUrl, source: listing.source || "website" }, { onConflict: "source,source_url" }).select().single();
+      if (inserted.error || !inserted.data) {
+        if (isListingWritePolicyError(inserted.error?.message)) {
+          const localListing = saveLocalListing(user.id, { ...listing, source_url: sourceUrl, source: listing.source || "website" });
+          if (resume) saveLocalMatch(user.id, resume.id, localListing.id, scores[index]);
+          localCount += 1;
+          continue;
+        }
+        onNotice(inserted.error?.message ?? "A listing was not saved."); continue;
+      }
+      savedCount += 1;
+      if (resume) {
+        saveLocalMatch(user.id, resume.id, inserted.data.id, scores[index]);
+        await supabase.from("matches").upsert({ user_id: user.id, resume_id: resume.id, listing_id: inserted.data.id, score: scores[index]?.score ?? 0, explanation: scores[index]?.explanation ?? null }, { onConflict: "user_id,resume_id,listing_id" });
+      }
     }
-    onNotice("Listing normalized and added to your workspace."); setBusy(false); await onComplete();
+    const total = savedCount + localCount;
+    onNotice(total ? `${total} opportunit${total === 1 ? "y" : "ies"} extracted and added to your workspace${localCount ? " locally" : ""}.` : "No opportunities could be saved.");
+    setBusy(false); await onComplete();
   };
-  return <div className="nexus-modal-backdrop"><div className="nexus-modal"><div className="flex items-start justify-between gap-4"><div><p className="nexus-eyebrow">Ingestion pipeline</p><h2 className="mt-2 text-xl font-semibold">Add an opportunity</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">Paste a public job or internship URL. Nexus will normalize the page, extract skills, and score it against your resume.</p></div><Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X /></Button></div><div className="mt-6 space-y-3"><label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground" htmlFor="listing-url">Public listing URL</label><Input id="listing-url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://company.com/jobs/..." autoFocus /></div><div className="mt-6 flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={() => void ingest()} disabled={busy || !url.trim()}>{busy ? <><RefreshCw className="animate-spin" /> Processing</> : <><Sparkles /> Normalize listing</>}</Button></div></div></div>;
+  return <div className="nexus-modal-backdrop"><div className="nexus-modal"><div className="flex items-start justify-between gap-4"><div><p className="nexus-eyebrow">Ingestion pipeline</p><h2 className="mt-2 text-xl font-semibold">Add an opportunity</h2><p className="mt-2 text-sm leading-6 text-muted-foreground">Paste a public careers page. Nexus extracts the roles, scores each one against your selected resume, and ranks the results by fit.</p></div><Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X /></Button></div><div className="mt-6 space-y-4"><div className="space-y-2"><label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground" htmlFor="listing-url">Website URL</label><Input id="listing-url" value={url} onChange={(event) => setUrl(event.target.value)} placeholder="https://company.com/careers" autoFocus /></div><div className="space-y-2"><label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground" htmlFor="resume-select">Score with resume</label><select id="resume-select" value={resumeId} onChange={(event) => setResumeId(event.target.value)} className="flex h-10 w-full rounded-md border border-input bg-background px-3 py-2 text-sm"><option value="">Do not score yet</option>{resumes.map((resume) => <option key={resume.id} value={resume.id}>{resume.file_name}</option>)}</select>{resumes.length === 0 && <p className="text-xs text-muted-foreground">Upload a resume first to receive fit scores.</p>}</div></div><div className="mt-6 flex justify-end gap-2"><Button variant="ghost" onClick={onClose}>Cancel</Button><Button onClick={() => void ingest()} disabled={busy || !url.trim()}>{busy ? <><RefreshCw className="animate-spin" /> Processing</> : <><Sparkles /> Extract and score</>}</Button></div></div></div>;
 }
 
-function ProfileDialog({ user, onClose, onSignedOut }: { user: User; onClose: () => void; onSignedOut: () => void }) {
+function ProfileDialog({ user, onClose, onUpdated, onSignedOut }: { user: User; onClose: () => void; onUpdated: (user: User) => void; onSignedOut: () => void }) {
+  const [name, setName] = useState(getDisplayName(user));
+  const [saving, setSaving] = useState(false);
   const signOut = async () => { await supabase.auth.signOut(); onSignedOut(); };
-  return <div className="nexus-modal-backdrop"><div className="nexus-modal max-w-md"><div className="flex items-start justify-between"><div><p className="nexus-eyebrow">Account</p><h2 className="mt-2 text-xl font-semibold">{getDisplayName(user)}</h2><p className="mt-1 text-sm text-muted-foreground">{user.email}</p></div><Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X /></Button></div><div className="mt-8 flex gap-2"><Button variant="outline" onClick={() => void signOut()}><LogOut /> Sign out</Button></div></div></div>;
+  const saveName = async () => {
+    const fullName = name.trim();
+    if (!fullName) return;
+    setSaving(true);
+    const result = await supabase.auth.updateUser({ data: { full_name: fullName } });
+    if (result.data.user) onUpdated(result.data.user);
+    setSaving(false);
+  };
+  return <div className="nexus-profile-backdrop" onMouseDown={onClose}><div className="nexus-profile-panel" onMouseDown={(event) => event.stopPropagation()}><div className="flex items-start justify-between gap-4"><div><p className="nexus-eyebrow">Profile</p><h2 className="mt-2 text-xl font-semibold">Your account</h2><p className="mt-1 text-sm text-muted-foreground">{user.email}</p></div><Button variant="ghost" size="icon" onClick={onClose} aria-label="Close"><X /></Button></div><div className="mt-6 space-y-2"><label className="text-xs font-semibold uppercase tracking-widest text-muted-foreground" htmlFor="profile-name">Display name</label><Input id="profile-name" value={name} maxLength={80} onChange={(event) => setName(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter") void saveName(); }} /></div><div className="mt-6 flex items-center justify-between gap-2"><Button variant="outline" onClick={() => void signOut()}><LogOut /> Sign out</Button><Button onClick={() => void saveName()} disabled={saving || !name.trim()}>{saving ? "Saving..." : "Save name"}</Button></div></div></div>;
 }
 
 function AuthScreen({ mode, onModeChange }: { mode: "sign-in" | "sign-up"; onModeChange: (mode: "sign-in" | "sign-up") => void }) {
   const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [sent, setSent] = useState(false);
   const submit = async () => { setBusy(true); setError(null); const result = mode === "sign-in" ? await supabase.auth.signInWithPassword({ email, password }) : await supabase.auth.signUp({ email, password }); if (result.error) setError(result.error.message); else if (mode === "sign-up") setSent(true); setBusy(false); };
-  const google = async () => { const result = await lovable.auth.signInWithOAuth("google", { redirect_uri: window.location.origin }); if (result.error) setError(result.error.message); };
-  return <div className="nexus-auth min-h-screen bg-background"><div className="nexus-auth-grid" /><div className="relative mx-auto flex min-h-screen max-w-6xl items-center justify-center px-5 py-10"><div className="grid w-full max-w-4xl overflow-hidden rounded-2xl border border-border bg-surface/70 shadow-2xl lg:grid-cols-[1.1fr_.9fr]"><div className="hidden min-h-[560px] flex-col justify-between border-r border-border p-10 lg:flex"><div><img src={logoAsset.url} alt="Nexus" className="size-14 rounded-2xl object-cover" /><p className="nexus-eyebrow mt-12">Autonomous career intelligence</p><h1 className="mt-4 max-w-md text-4xl font-semibold leading-tight tracking-tight">Less scrolling. More signal.</h1><p className="mt-5 max-w-md text-sm leading-7 text-muted-foreground">Nexus turns messy job listings into structured, personal, actionable opportunities.</p></div><div className="flex items-center gap-3 text-xs text-muted-foreground"><Zap className="size-4 text-primary" /> Private by default · powered by your own workspace</div></div><div className="p-6 sm:p-10"><div className="flex items-center gap-3 lg:hidden"><img src={logoAsset.url} alt="Nexus" className="size-10 rounded-xl object-cover" /><span className="text-lg font-semibold">Nexus</span></div><div className="mt-8 lg:mt-0"><p className="nexus-eyebrow">Your workspace</p><h2 className="mt-2 text-2xl font-semibold">{mode === "sign-in" ? "Welcome back" : "Create your workspace"}</h2><p className="mt-2 text-sm text-muted-foreground">{mode === "sign-in" ? "Pick up where your search left off." : "Start building a career search that remembers what matters."}</p></div>{sent ? <div className="mt-8 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 text-sm leading-6 text-emerald-200">Check your email to confirm your account, then come back to Nexus.</div> : <><div className="mt-8 space-y-3"><Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /><Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" /></div>{error && <p className="mt-3 text-sm text-red-300">{error}</p>}<Button className="mt-5 w-full" onClick={() => void submit()} disabled={busy || !email || !password}>{busy ? "Working..." : mode === "sign-in" ? "Enter Nexus" : "Create account"}</Button><div className="my-5 flex items-center gap-3 text-[10px] uppercase tracking-widest text-muted-foreground"><span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" /></div><Button variant="outline" className="w-full" onClick={() => void google()}><Github /> Continue with Google</Button><p className="mt-6 text-center text-sm text-muted-foreground">{mode === "sign-in" ? "New to Nexus?" : "Already have an account?"} <button className="font-medium text-primary hover:underline" onClick={() => onModeChange(mode === "sign-in" ? "sign-up" : "sign-in")}>{mode === "sign-in" ? "Create one" : "Sign in"}</button></p></>}</div></div></div></div>;
+  const google = async () => { const result = await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: window.location.origin } }); if (result.error) setError(result.error.message); };
+  return <div className="nexus-auth min-h-screen bg-background"><div className="nexus-auth-grid" /><div className="relative mx-auto flex min-h-screen max-w-6xl items-center justify-center px-5 py-10"><div className="grid w-full max-w-4xl overflow-hidden rounded-2xl border border-border bg-surface/70 shadow-2xl lg:grid-cols-[1.1fr_.9fr]"><div className="hidden min-h-[560px] flex-col justify-between border-r border-border p-10 lg:flex"><div><p className="nexus-eyebrow mt-12">Career intelligence</p><h1 className="mt-4 max-w-md text-4xl font-semibold leading-tight tracking-tight">Less scrolling. More signal.</h1><p className="mt-5 max-w-md text-sm leading-7 text-muted-foreground">Turn messy job listings into structured, personal, actionable opportunities.</p></div><div className="text-xs text-muted-foreground">Private by default · powered by your own workspace</div></div><div className="p-6 sm:p-10"><div className="mt-8 lg:mt-0"><p className="nexus-eyebrow">Your workspace</p><h2 className="mt-2 text-2xl font-semibold">{mode === "sign-in" ? "Welcome back" : "Create your workspace"}</h2><p className="mt-2 text-sm text-muted-foreground">{mode === "sign-in" ? "Pick up where your search left off." : "Start building a career search that remembers what matters."}</p></div>{sent ? <div className="mt-8 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 text-sm leading-6 text-emerald-200">Check your email to confirm your account, then come back.</div> : <><div className="mt-8 space-y-3"><Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /><Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" /></div>{error && <p className="mt-3 text-sm text-red-300">{error}</p>}<Button className="mt-5 w-full" onClick={() => void submit()} disabled={busy || !email || !password}>{busy ? "Working..." : mode === "sign-in" ? "Sign in" : "Create account"}</Button><div className="my-5 flex items-center gap-3 text-[10px] uppercase tracking-widest text-muted-foreground"><span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" /></div><Button variant="outline" className="w-full" onClick={() => void google()}>Continue with Google</Button><p className="mt-6 text-center text-sm text-muted-foreground">{mode === "sign-in" ? "New here?" : "Already have an account?"} <button className="font-medium text-primary hover:underline" onClick={() => onModeChange(mode === "sign-in" ? "sign-up" : "sign-in")}>{mode === "sign-in" ? "Create one" : "Sign in"}</button></p></>}</div></div></div></div>;
 }
 
 function LoadingScreen() { return <div className="flex min-h-screen items-center justify-center bg-background"><RefreshCw className="size-5 animate-spin text-primary" /></div>; }
 function Notice({ message, onClose }: { message: string; onClose: () => void }) { return <div className="fixed bottom-5 right-5 z-50 flex max-w-sm items-start gap-3 rounded-xl border border-border bg-surface p-4 text-sm shadow-2xl"><CircleAlert className="mt-0.5 size-4 shrink-0 text-amber-300" /><span className="flex-1 leading-6">{message}</span><button onClick={onClose} aria-label="Close notice"><X className="size-4 text-muted-foreground" /></button></div>; }
 
 async function toggleShortlist(userId: string, listingId: string, exists: boolean) { if (exists) await supabase.from("shortlist_items").delete().eq("user_id", userId).eq("listing_id", listingId); else await supabase.from("shortlist_items").insert({ user_id: userId, listing_id: listingId, status: "saved" }); }
+function localListingsKey(userId: string) { return `nexus-local-listings:${userId}`; }
+function getLocalListings(userId: string): Listing[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const data: unknown = JSON.parse(window.localStorage.getItem(localListingsKey(userId)) ?? "[]");
+    return Array.isArray(data) ? data as Listing[] : [];
+  } catch { return []; }
+}
+function saveLocalListing(userId: string, listing: Database["public"]["Tables"]["listings"]["Insert"]) {
+  const now = new Date().toISOString();
+  const record: Listing = {
+    id: crypto.randomUUID(),
+    source: listing.source,
+    source_listing_id: listing.source_listing_id ?? null,
+    source_url: listing.source_url,
+    title: listing.title,
+    company: listing.company,
+    location: listing.location ?? null,
+    remote_ok: listing.remote_ok ?? false,
+    stipend: listing.stipend ?? null,
+    required_skills: listing.required_skills ?? [],
+    experience_level: listing.experience_level ?? null,
+    deadline: listing.deadline ?? null,
+    description: listing.description ?? null,
+    raw_text: listing.raw_text ?? null,
+    extraction_status: listing.extraction_status ?? "ready",
+    scraped_at: listing.scraped_at ?? now,
+    created_at: now,
+    updated_at: now,
+  };
+  const listings = getLocalListings(userId).filter((item) => item.source_url !== record.source_url);
+  window.localStorage.setItem(localListingsKey(userId), JSON.stringify([record, ...listings]));
+  return record;
+}
+function localMatchesKey(userId: string) { return `nexus-local-matches:${userId}`; }
+function getLocalMatches(userId: string): Match[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const data: unknown = JSON.parse(window.localStorage.getItem(localMatchesKey(userId)) ?? "[]");
+    return Array.isArray(data) ? data as Match[] : [];
+  } catch { return []; }
+}
+function saveLocalMatch(userId: string, resumeId: string, listingId: string, value?: { score?: number; explanation?: string }) {
+  const now = new Date().toISOString();
+  const record: Match = { id: crypto.randomUUID(), user_id: userId, resume_id: resumeId, listing_id: listingId, score: value?.score ?? 0, explanation: value?.explanation ?? null, created_at: now, updated_at: now };
+  const matches = getLocalMatches(userId).filter((item) => item.listing_id !== listingId || item.resume_id !== resumeId);
+  window.localStorage.setItem(localMatchesKey(userId), JSON.stringify([record, ...matches]));
+}
+function localResumesKey(userId: string) { return `nexus-local-resumes:${userId}`; }
+function getLocalResumes(userId: string): Resume[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const data: unknown = JSON.parse(window.localStorage.getItem(localResumesKey(userId)) ?? "[]");
+    return Array.isArray(data) ? data as Resume[] : [];
+  } catch { return []; }
+}
+function saveLocalResume(userId: string, fileName: string, storagePath: string, extractedText: string) {
+  const now = new Date().toISOString();
+  const record: Resume = { id: crypto.randomUUID(), user_id: userId, file_name: fileName, storage_path: storagePath, extracted_text: extractedText, skills: [], processing_status: "ready", processing_error: null, created_at: now, updated_at: now };
+  const resumes = getLocalResumes(userId).filter((item) => item.file_name !== fileName);
+  window.localStorage.setItem(localResumesKey(userId), JSON.stringify([record, ...resumes]));
+  return record;
+}
+function chatHistoryKey(userId: string) { return `nexus-chat-history:${userId}`; }
+function getChatHistory(userId: string): ChatMessage[] {
+  if (typeof window === "undefined") return [];
+  try {
+    const data: unknown = JSON.parse(window.localStorage.getItem(chatHistoryKey(userId)) ?? "[]");
+    return Array.isArray(data) ? data.filter((message): message is ChatMessage => Boolean(message) && typeof message === "object" && (message as ChatMessage).role !== undefined && typeof (message as ChatMessage).content === "string").slice(-40) : [];
+  } catch { return []; }
+}
+function saveChatHistory(userId: string, history: ChatMessage[]) {
+  if (typeof window !== "undefined") window.localStorage.setItem(chatHistoryKey(userId), JSON.stringify(history.slice(-40)));
+}
+function isListingWritePolicyError(message?: string) { return Boolean(message && (/row-level security/i.test(message) || /permission denied/i.test(message))); }
 function getDisplayName(user: User) { return typeof user.user_metadata?.full_name === "string" ? user.user_metadata.full_name : user.email?.split("@")[0] ?? "there"; }
 function getInitials(value: string) { return value.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase(); }
 function formatTime(value: string) { return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
 function formatDate(value: string) { return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value)); }
+
+async function extractPdfText(file: File) {
+  const pdfjs = await import("pdfjs-dist");
+  pdfjs.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+  const document = await pdfjs.getDocument({ data: new Uint8Array(await file.arrayBuffer()) }).promise;
+  const pages = await Promise.all(Array.from({ length: document.numPages }, async (_, index) => {
+    const page = await document.getPage(index + 1);
+    const content = await page.getTextContent();
+    return content.items.map((item) => ("str" in item ? item.str : "")).join(" ");
+  }));
+  return pages.join("\n").replace(/\s+/g, " ").trim().slice(0, 30000);
+}
