@@ -1,0 +1,5 @@
+- [ ] Review Nexus PRD and define first usable workflows
+- [ ] Connect Lovable Cloud and real data model
+- [ ] Add Nexus logo and cockpit interface
+- [ ] Add Groq-backed assistant with secure key storage
+- [ ] Validate build and live preview interactions
