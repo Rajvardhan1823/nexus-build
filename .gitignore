@@ -17,6 +17,7 @@ dist-ssr
 .nitro
 *.local
 .env
+.vercel-cli-home/
 
 # Wrangler / Cloudflare
 .wrangler/
