@@ -30,7 +30,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { supabase } from "@/integrations/supabase/client";
-import type { Database } from "@/integrations/supabase/types";
+import type { Database, Json } from "@/integrations/supabase/types";
 
 
 export const Route = createFileRoute("/")({
@@ -226,7 +226,8 @@ function Index() {
               {activeView === "resume" ? (
                 <ResumePanel user={user} resumes={data.resumes} listings={data.listings} onRefresh={loadData} onNotice={setNotice} />
               ) : activeView === "shortlist" ? (
-                <ListingStream
+                <>
+                  <ListingStream
                   title="Your shortlist"
                   listings={visibleListings.filter((listing) => shortlistIds.has(listing.id))}
                   matchByListing={matchByListing}
@@ -237,7 +238,9 @@ function Index() {
                   }}
                   emptyTitle="Your shortlist is clear"
                   emptyDescription="Save a role from Matches to keep it here for applications and LaunchKits."
-                />
+                  />
+                  <BriefingSummary userId={user.id} />
+                </>
               ) : activeView === "matches" ? (
                 <ListingStream
                   title="Best matches"
@@ -309,6 +312,19 @@ function ListingRow({ listing, match, shortlisted, onToggle }: { listing: Listin
   return <article className="nexus-listing group"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="nexus-pill">{listing.source}</span>{score > 0 && <span className="nexus-pill nexus-pill-accent">{Math.round(score)}% fit</span>}{listing.remote_ok && <span className="nexus-pill">Remote</span>}</div><h3 className="mt-3 truncate text-sm font-semibold text-foreground">{listing.title}</h3><p className="mt-1 text-xs text-muted-foreground">{listing.company}{listing.location ? ` · ${listing.location}` : ""}</p><div className="mt-3 flex flex-wrap gap-2">{listing.required_skills.slice(0, 4).map((skill) => <span key={skill} className="text-[11px] text-muted-foreground">#{skill}</span>)}</div>{match?.explanation && <p className="mt-3 max-w-2xl text-xs leading-5 text-muted-foreground">{match.explanation}</p>}</div><div className="flex shrink-0 items-start gap-2"><Button variant="ghost" size="icon" onClick={() => void save()} disabled={saving} aria-label={shortlisted ? "Remove from shortlist" : "Save to shortlist"} title={shortlisted ? "Remove from shortlist" : "Save to shortlist"}>{shortlisted ? <Heart className="fill-current text-accent" /> : <Heart />}</Button><Button asChild variant="outline" size="icon" aria-label="Open listing" title="Open listing"><a href={listing.source_url} target="_blank" rel="noreferrer"><ArrowUpRight /></a></Button></div></article>;
 }
 
+function BriefingSummary({ userId }: { userId: string }) {
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
+  useEffect(() => {
+    let mounted = true;
+    void supabase.from("chat_briefings").select("messages, updated_at").eq("user_id", userId).maybeSingle().then(({ data }) => {
+      if (mounted) setMessages(parseChatHistory(data?.messages));
+    });
+    return () => { mounted = false; };
+  }, [userId]);
+  const lastBriefing = [...messages].reverse().find((message) => message.role === "assistant");
+  return <section className="nexus-panel"><p className="nexus-eyebrow">Past briefing</p><h2 className="mt-2 text-lg font-semibold">Career assistant notes</h2>{lastBriefing ? <p className="mt-3 text-sm leading-6 text-muted-foreground">{lastBriefing.content}</p> : <p className="mt-3 text-sm text-muted-foreground">Your saved assistant briefings will appear here after you chat.</p>}</section>;
+}
+
 function ActivityRow({ item }: { item: Job | (Listing & { job_type: string; status: string }) }) {
   const isJob = "job_type" in item && item.job_type !== "listing";
   const title = isJob ? `${item.job_type} job` : item.title;
@@ -366,8 +382,19 @@ function AssistantPanel({ userId, data, onNotice }: { userId: string; data: Work
   const [question, setQuestion] = useState("");
   const [history, setHistory] = useState<ChatMessage[]>(() => getChatHistory(userId));
   const [asking, setAsking] = useState(false);
-  useEffect(() => { setHistory(getChatHistory(userId)); }, [userId]);
-  const updateHistory = (next: ChatMessage[]) => { setHistory(next); saveChatHistory(userId, next); };
+  useEffect(() => {
+    setHistory(getChatHistory(userId));
+    void supabase.from("chat_briefings").select("messages").eq("user_id", userId).maybeSingle().then(({ data: briefing }) => {
+      const saved = parseChatHistory(briefing?.messages);
+      if (saved.length) { setHistory(saved); saveChatHistory(userId, saved); }
+    });
+  }, [userId]);
+  const updateHistory = (next: ChatMessage[]) => {
+    const limited = next.slice(-40);
+    setHistory(limited);
+    saveChatHistory(userId, limited);
+    void supabase.from("chat_briefings").upsert({ user_id: userId, title: "Career assistant", messages: limited as unknown as Json }, { onConflict: "user_id" });
+  };
   const ask = async () => {
     if (!question.trim()) return;
     const submittedQuestion = question.trim();
@@ -376,7 +403,7 @@ function AssistantPanel({ userId, data, onNotice }: { userId: string; data: Work
     updateHistory(nextHistory);
     setQuestion("");
     setAsking(true);
-    const resumeContext = data.resumes.slice(0, 3).map((resume) => ({ fileName: resume.file_name, extractedText: resume.extracted_text.slice(0, 14000) }));
+    const resumeContext = data.resumes.slice(0, 3).map((resume) => ({ fileName: resume.file_name, extractedText: (resume.extracted_text ?? "").slice(0, 14000) }));
     const response = await fetch("/api/groq", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "chat", question: submittedQuestion, context: { resumes: resumeContext, listings: data.listings.slice(0, 30), matches: data.matches.slice(0, 50), shortlist: data.shortlist, conversation: nextHistory.slice(-8).map(({ role, content }) => ({ role, content })) } }) });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -388,7 +415,7 @@ function AssistantPanel({ userId, data, onNotice }: { userId: string; data: Work
     }
     setAsking(false);
   };
-  return <aside className="nexus-assistant w-full rounded-xl border border-border bg-surface/40"><div className="border-b border-border px-5 py-5"><p className="nexus-eyebrow">Career assistant</p><h2 className="mt-1 text-sm font-bold uppercase tracking-widest">Nexus AI</h2></div><div className="flex flex-1 flex-col gap-4 p-5"><div className="nexus-message">{data.resumes.length ? `Using ${data.resumes[0].file_name} and your extracted opportunities.` : "Upload a resume and extract a jobs page, then ask about your opportunities."}</div>{history.map((message) => <div key={message.id} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-xl bg-primary px-4 py-3 text-sm text-primary-foreground" : "max-w-[95%] rounded-xl border border-primary/15 bg-primary/5 p-4 text-sm leading-6 text-foreground"}>{message.content}</div>)}{asking && <div className="flex items-center gap-3 rounded-xl border border-primary/15 bg-primary/5 p-4 text-sm text-primary"><RefreshCw className="size-4 animate-spin" /> Thinking…</div>}{history.length === 0 && <div className="rounded-xl border border-primary/15 bg-primary/5 p-4"><p className="nexus-eyebrow">Try asking</p><button className="mt-2 text-left text-xs italic text-foreground" onClick={() => setQuestion("Which roles should I prioritize based on my resume?")}>“Which roles should I prioritize based on my resume?”</button></div>}</div><div className="border-t border-border p-4"><div className="flex items-end gap-2 rounded-lg border border-border bg-background p-2 focus-within:border-primary/50"><Textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void ask(); } }} placeholder="Ask about your resume or jobs..." rows={2} className="min-h-0 resize-none border-0 bg-transparent p-1 text-xs shadow-none focus-visible:ring-0" /><Button size="icon" onClick={() => void ask()} disabled={asking || !question.trim()} aria-label="Ask Nexus" title="Ask Nexus"><Send /></Button></div></div></aside>;
+  return <aside className="nexus-assistant w-full rounded-xl border border-border bg-surface/40"><div className="border-b border-border px-5 py-5"><p className="nexus-eyebrow">Career assistant</p><h2 className="mt-1 text-sm font-bold uppercase tracking-widest">Nexus AI</h2></div><div className="flex flex-1 flex-col gap-4 p-5"><div className="nexus-message">{data.resumes[0] ? `Using ${data.resumes[0].file_name} and your extracted opportunities.` : "Upload a resume and extract a jobs page, then ask about your opportunities."}</div>{history.map((message) => <div key={message.id} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-xl bg-primary px-4 py-3 text-sm text-primary-foreground" : "max-w-[95%] rounded-xl border border-primary/15 bg-primary/5 p-4 text-sm leading-6 text-foreground"}>{message.content}</div>)}{asking && <div className="flex items-center gap-3 rounded-xl border border-primary/15 bg-primary/5 p-4 text-sm text-primary"><RefreshCw className="size-4 animate-spin" /> Thinking…</div>}{history.length === 0 && <div className="rounded-xl border border-primary/15 bg-primary/5 p-4"><p className="nexus-eyebrow">Try asking</p><button className="mt-2 text-left text-xs italic text-foreground" onClick={() => setQuestion("Which roles should I prioritize based on my resume?")}>“Which roles should I prioritize based on my resume?”</button></div>}</div><div className="border-t border-border p-4"><div className="flex items-end gap-2 rounded-lg border border-border bg-background p-2 focus-within:border-primary/50"><Textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void ask(); } }} placeholder="Ask about your resume or jobs..." rows={2} className="min-h-0 resize-none border-0 bg-transparent p-1 text-xs shadow-none focus-visible:ring-0" /><Button size="icon" onClick={() => void ask()} disabled={asking || !question.trim()} aria-label="Ask Nexus" title="Ask Nexus"><Send /></Button></div></div></aside>;
 }
 
 function IngestDialog({ user, resumes, onClose, onComplete, onNotice }: { user: User; resumes: Resume[]; onClose: () => void; onComplete: () => Promise<void>; onNotice: (message: string) => void }) {
@@ -409,7 +436,7 @@ function IngestDialog({ user, resumes, onClose, onComplete, onNotice }: { user: 
     let localCount = 0;
     for (const [index, listing] of listings.entries()) {
       const sourceUrl = `${url.trim()}#nexus-opportunity-${index + 1}`;
-      const inserted = await supabase.from("listings").upsert({ ...listing, source_url: sourceUrl, source: listing.source || "website" }, { onConflict: "source,source_url" }).select().single();
+      const inserted = await supabase.from("listings").upsert({ ...listing, user_id: user.id, source_url: sourceUrl, source: listing.source || "website" }, { onConflict: "user_id,source,source_url" }).select().single();
       if (inserted.error || !inserted.data) {
         if (isListingWritePolicyError(inserted.error?.message)) {
           const localListing = saveLocalListing(user.id, { ...listing, source_url: sourceUrl, source: listing.source || "website" });
@@ -450,8 +477,8 @@ function ProfileDialog({ user, onClose, onUpdated, onSignedOut }: { user: User; 
 function AuthScreen({ mode, onModeChange }: { mode: "sign-in" | "sign-up"; onModeChange: (mode: "sign-in" | "sign-up") => void }) {
   const [email, setEmail] = useState(""); const [password, setPassword] = useState(""); const [busy, setBusy] = useState(false); const [error, setError] = useState<string | null>(null); const [sent, setSent] = useState(false);
   const submit = async () => { setBusy(true); setError(null); const result = mode === "sign-in" ? await supabase.auth.signInWithPassword({ email, password }) : await supabase.auth.signUp({ email, password }); if (result.error) setError(result.error.message); else if (mode === "sign-up") setSent(true); setBusy(false); };
-  const google = async () => { const result = await supabase.auth.signInWithOAuth({ provider: "google", options: { redirectTo: window.location.origin } }); if (result.error) setError(result.error.message); };
-  return <div className="nexus-auth min-h-screen bg-background"><div className="nexus-auth-grid" /><div className="relative mx-auto flex min-h-screen max-w-6xl items-center justify-center px-5 py-10"><div className="grid w-full max-w-4xl overflow-hidden rounded-2xl border border-border bg-surface/70 shadow-2xl lg:grid-cols-[1.1fr_.9fr]"><div className="hidden min-h-[560px] flex-col justify-between border-r border-border p-10 lg:flex"><div><p className="nexus-eyebrow mt-12">Career intelligence</p><h1 className="mt-4 max-w-md text-4xl font-semibold leading-tight tracking-tight">Less scrolling. More signal.</h1><p className="mt-5 max-w-md text-sm leading-7 text-muted-foreground">Turn messy job listings into structured, personal, actionable opportunities.</p></div><div className="text-xs text-muted-foreground">Private by default · powered by your own workspace</div></div><div className="p-6 sm:p-10"><div className="mt-8 lg:mt-0"><p className="nexus-eyebrow">Your workspace</p><h2 className="mt-2 text-2xl font-semibold">{mode === "sign-in" ? "Welcome back" : "Create your workspace"}</h2><p className="mt-2 text-sm text-muted-foreground">{mode === "sign-in" ? "Pick up where your search left off." : "Start building a career search that remembers what matters."}</p></div>{sent ? <div className="mt-8 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 text-sm leading-6 text-emerald-200">Check your email to confirm your account, then come back.</div> : <><div className="mt-8 space-y-3"><Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /><Input type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password" /></div>{error && <p className="mt-3 text-sm text-red-300">{error}</p>}<Button className="mt-5 w-full" onClick={() => void submit()} disabled={busy || !email || !password}>{busy ? "Working..." : mode === "sign-in" ? "Sign in" : "Create account"}</Button><div className="my-5 flex items-center gap-3 text-[10px] uppercase tracking-widest text-muted-foreground"><span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" /></div><Button variant="outline" className="w-full" onClick={() => void google()}>Continue with Google</Button><p className="mt-6 text-center text-sm text-muted-foreground">{mode === "sign-in" ? "New here?" : "Already have an account?"} <button className="font-medium text-primary hover:underline" onClick={() => onModeChange(mode === "sign-in" ? "sign-up" : "sign-in")}>{mode === "sign-in" ? "Create one" : "Sign in"}</button></p></>}</div></div></div></div>;
+  const oauth = async (provider: "google" | "github") => { const result = await supabase.auth.signInWithOAuth({ provider, options: { redirectTo: window.location.origin } }); if (result.error) setError(result.error.message); };
+  return <div className="nexus-auth min-h-screen bg-background"><div className="nexus-auth-grid" /><div className="relative mx-auto flex min-h-screen max-w-6xl items-center justify-center px-5 py-10"><div className="grid w-full max-w-4xl overflow-hidden rounded-2xl border border-border bg-surface/70 shadow-2xl lg:grid-cols-[1.1fr_.9fr]"><div className="hidden min-h-[560px] flex-col justify-between border-r border-border p-10 lg:flex"><div><p className="nexus-eyebrow mt-12">Career intelligence</p><h1 className="mt-4 max-w-md text-4xl font-semibold leading-tight tracking-tight">Less scrolling. More signal.</h1><p className="mt-5 max-w-md text-sm leading-7 text-muted-foreground">Turn messy job listings into structured, personal, actionable opportunities.</p></div><div className="text-xs text-muted-foreground">Private by default · powered by your own workspace</div></div><div className="p-6 sm:p-10"><div className="mt-8 lg:mt-0"><p className="nexus-eyebrow">Your workspace</p><h2 className="mt-2 text-2xl font-semibold">{mode === "sign-in" ? "Welcome back" : "Create your workspace"}</h2><p className="mt-2 text-sm text-muted-foreground">{mode === "sign-in" ? "Pick up where your search left off." : "Start building a career search that remembers what matters."}</p></div>{sent ? <div className="mt-8 rounded-xl border border-emerald-500/20 bg-emerald-500/5 p-4 text-sm leading-6 text-emerald-200">Check your email to confirm your account, then come back.</div> : <><div className="mt-8 space-y-3"><Input type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /><Input type="password" minLength={8} value={password} onChange={(event) => setPassword(event.target.value)} placeholder="Password (8+ characters)" /></div>{error && <p className="mt-3 text-sm text-red-300">{error}</p>}<Button className="mt-5 w-full" onClick={() => void submit()} disabled={busy || !email || password.length < 8}>{busy ? "Working..." : mode === "sign-in" ? "Sign in" : "Create account"}</Button><div className="my-5 flex items-center gap-3 text-[10px] uppercase tracking-widest text-muted-foreground"><span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" /></div><div className="grid gap-3 sm:grid-cols-2"><Button variant="outline" className="w-full" onClick={() => void oauth("google")}>Continue with Google</Button><Button variant="outline" className="w-full" onClick={() => void oauth("github")}>Continue with GitHub</Button></div><p className="mt-6 text-center text-sm text-muted-foreground">{mode === "sign-in" ? "New here?" : "Already have an account?"} <button className="font-medium text-primary hover:underline" onClick={() => onModeChange(mode === "sign-in" ? "sign-up" : "sign-in")}>{mode === "sign-in" ? "Create one" : "Sign in"}</button></p></>}</div></div></div></div>;
 }
 
 function LoadingScreen() { return <div className="flex min-h-screen items-center justify-center bg-background"><RefreshCw className="size-5 animate-spin text-primary" /></div>; }
@@ -487,6 +514,7 @@ function saveLocalListing(userId: string, listing: Database["public"]["Tables"][
     scraped_at: listing.scraped_at ?? now,
     created_at: now,
     updated_at: now,
+    user_id: userId,
   };
   const listings = getLocalListings(userId).filter((item) => item.source_url !== record.source_url);
   window.localStorage.setItem(localListingsKey(userId), JSON.stringify([record, ...listings]));
@@ -525,9 +553,11 @@ function chatHistoryKey(userId: string) { return `nexus-chat-history:${userId}`;
 function getChatHistory(userId: string): ChatMessage[] {
   if (typeof window === "undefined") return [];
   try {
-    const data: unknown = JSON.parse(window.localStorage.getItem(chatHistoryKey(userId)) ?? "[]");
-    return Array.isArray(data) ? data.filter((message): message is ChatMessage => Boolean(message) && typeof message === "object" && (message as ChatMessage).role !== undefined && typeof (message as ChatMessage).content === "string").slice(-40) : [];
+    return parseChatHistory(JSON.parse(window.localStorage.getItem(chatHistoryKey(userId)) ?? "[]"));
   } catch { return []; }
+}
+function parseChatHistory(value: unknown): ChatMessage[] {
+  return Array.isArray(value) ? value.filter((message): message is ChatMessage => Boolean(message) && typeof message === "object" && ((message as ChatMessage).role === "user" || (message as ChatMessage).role === "assistant") && typeof (message as ChatMessage).content === "string" && typeof (message as ChatMessage).createdAt === "string").slice(-40) : [];
 }
 function saveChatHistory(userId: string, history: ChatMessage[]) {
   if (typeof window !== "undefined") window.localStorage.setItem(chatHistoryKey(userId), JSON.stringify(history.slice(-40)));

@@ -81,6 +81,7 @@ export type Database = {
           stipend: string | null
           title: string
           updated_at: string
+          user_id: string
         }
         Insert: {
           company: string
@@ -101,6 +102,7 @@ export type Database = {
           stipend?: string | null
           title: string
           updated_at?: string
+          user_id: string
         }
         Update: {
           company?: string
@@ -121,6 +123,34 @@ export type Database = {
           stipend?: string | null
           title?: string
           updated_at?: string
+          user_id?: string
+        }
+        Relationships: []
+      }
+      chat_briefings: {
+        Row: {
+          created_at: string
+          id: string
+          messages: Json
+          title: string
+          updated_at: string
+          user_id: string
+        }
+        Insert: {
+          created_at?: string
+          id?: string
+          messages?: Json
+          title?: string
+          updated_at?: string
+          user_id: string
+        }
+        Update: {
+          created_at?: string
+          id?: string
+          messages?: Json
+          title?: string
+          updated_at?: string
+          user_id?: string
         }
         Relationships: []
       }
