@@ -60,6 +60,7 @@ type Shortlist = Database["public"]["Tables"]["shortlist_items"]["Row"];
 type Job = Database["public"]["Tables"]["action_jobs"]["Row"];
 type User = { id: string; email?: string | null; user_metadata?: Record<string, unknown> };
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string; createdAt: string };
+type ActivityItem = Job | (Listing & { job_type: string; status: string });
 
 type WorkspaceData = {
   listings: Listing[];
@@ -151,7 +152,7 @@ function Index() {
     const haystack = `${listing.title} ${listing.company} ${listing.location ?? ""} ${listing.required_skills.join(" ")}`.toLowerCase();
     return haystack.includes(search.toLowerCase());
   }).sort((a, b) => (matchByListing.get(b.id)?.score ?? 0) - (matchByListing.get(a.id)?.score ?? 0));
-  const activity = [...data.jobs, ...data.listings.map((listing) => ({ ...listing, job_type: "listing", status: listing.extraction_status, created_at: listing.created_at, id: listing.id }))]
+  const activity: ActivityItem[] = [...data.jobs, ...data.listings.map((listing) => ({ ...listing, job_type: "listing", status: listing.extraction_status, created_at: listing.created_at, id: listing.id }))]
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .slice(0, 6);
 
@@ -306,8 +307,8 @@ function ListingRow({ listing, match, shortlisted, onToggle }: { listing: Listin
   return <article className="nexus-listing group"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="nexus-pill">{listing.source}</span>{score > 0 && <span className="nexus-pill nexus-pill-accent">{Math.round(score)}% fit</span>}{listing.remote_ok && <span className="nexus-pill">Remote</span>}</div><h3 className="mt-3 truncate text-sm font-semibold text-foreground">{listing.title}</h3><p className="mt-1 text-xs text-muted-foreground">{listing.company}{listing.location ? ` · ${listing.location}` : ""}</p><div className="mt-3 flex flex-wrap gap-2">{listing.required_skills.slice(0, 4).map((skill) => <span key={skill} className="text-[11px] text-muted-foreground">#{skill}</span>)}</div>{match?.explanation && <p className="mt-3 max-w-2xl text-xs leading-5 text-muted-foreground">{match.explanation}</p>}</div><div className="flex shrink-0 items-start gap-2"><Button variant="ghost" size="icon" onClick={() => void save()} disabled={saving} aria-label={shortlisted ? "Remove from shortlist" : "Save to shortlist"} title={shortlisted ? "Remove from shortlist" : "Save to shortlist"}>{shortlisted ? <Heart className="fill-current text-accent" /> : <Heart />}</Button><Button asChild variant="outline" size="icon" aria-label="Open listing" title="Open listing"><a href={listing.source_url} target="_blank" rel="noreferrer"><ArrowUpRight /></a></Button></div></article>;
 }
 
-function ActivityRow({ item }: { item: Job | (Listing & { job_type: "listing"; status: string }) }) {
-  const isListing = item.job_type === "listing";
+function ActivityRow({ item }: { item: ActivityItem }) {
+  const isListing = "title" in item;
   const title = isListing ? item.title : `${item.job_type} job`;
   const detail = isListing ? `${item.company} · ${item.extraction_status}` : `${item.status} · action queue`;
   return <div className="nexus-activity-row"><div className="nexus-time">{formatTime(item.created_at)}</div><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className={`nexus-pill ${isListing ? "" : "nexus-pill-accent"}`}>{isListing ? "Listing" : "Action"}</span><span className="truncate text-sm font-semibold">{title}</span></div><p className="mt-1 truncate text-xs text-muted-foreground">{detail}</p></div><Activity className="size-4 shrink-0 text-muted-foreground" /></div>;
