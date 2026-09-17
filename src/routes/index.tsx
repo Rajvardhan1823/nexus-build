@@ -60,6 +60,7 @@ type Shortlist = Database["public"]["Tables"]["shortlist_items"]["Row"];
 type Job = Database["public"]["Tables"]["action_jobs"]["Row"];
 type User = { id: string; email?: string | null; user_metadata?: Record<string, unknown> };
 type ChatMessage = { id: string; role: "user" | "assistant"; content: string; createdAt: string };
+type ActivityItem = Job | (Listing & { job_type: string; status: string });
 
 type WorkspaceData = {
   listings: Listing[];
@@ -151,7 +152,7 @@ function Index() {
     const haystack = `${listing.title} ${listing.company} ${listing.location ?? ""} ${listing.required_skills.join(" ")}`.toLowerCase();
     return haystack.includes(search.toLowerCase());
   }).sort((a, b) => (matchByListing.get(b.id)?.score ?? 0) - (matchByListing.get(a.id)?.score ?? 0));
-  const activity = [...data.jobs, ...data.listings.map((listing) => ({ ...listing, job_type: "listing", status: listing.extraction_status, created_at: listing.created_at, id: listing.id }))]
+  const activity: ActivityItem[] = [...data.jobs, ...data.listings.map((listing) => ({ ...listing, job_type: "listing", status: listing.extraction_status, created_at: listing.created_at, id: listing.id }))]
     .sort((a, b) => b.created_at.localeCompare(a.created_at))
     .slice(0, 6);
 
@@ -299,18 +300,18 @@ function ListingStream({ title, listings, matchByListing, shortlistIds, onToggle
   return <section className="space-y-4"><div className="flex items-center justify-between"><h2 className="nexus-section-title"><span className="nexus-live-dot" /> {title}</h2><span className="font-mono text-xs text-muted-foreground">{listings.length.toString().padStart(2, "0")} records</span></div>{listings.length === 0 ? <div className="nexus-empty"><Inbox className="size-6 text-muted-foreground" /><h3>{emptyTitle}</h3><p>{emptyDescription}</p></div> : <div className="space-y-3">{listings.map((listing) => <ListingRow key={listing.id} listing={listing} match={matchByListing.get(listing.id)} shortlisted={shortlistIds.has(listing.id)} onToggle={() => onToggleShortlist(listing.id)} />)}</div>}</section>;
 }
 
-function ListingRow({ listing, match, shortlisted, onToggle }: { listing: Listing; match?: Match; shortlisted: boolean; onToggle: () => Promise<void> }) {
+function ListingRow({ listing, match, shortlisted, onToggle }: { listing: Listing; match?: Match | undefined; shortlisted: boolean; onToggle: () => Promise<void> }) {
   const [saving, setSaving] = useState(false);
   const score = match?.score ?? 0;
   const save = async () => { setSaving(true); await onToggle(); setSaving(false); };
   return <article className="nexus-listing group"><div className="min-w-0 flex-1"><div className="flex flex-wrap items-center gap-2"><span className="nexus-pill">{listing.source}</span>{score > 0 && <span className="nexus-pill nexus-pill-accent">{Math.round(score)}% fit</span>}{listing.remote_ok && <span className="nexus-pill">Remote</span>}</div><h3 className="mt-3 truncate text-sm font-semibold text-foreground">{listing.title}</h3><p className="mt-1 text-xs text-muted-foreground">{listing.company}{listing.location ? ` · ${listing.location}` : ""}</p><div className="mt-3 flex flex-wrap gap-2">{listing.required_skills.slice(0, 4).map((skill) => <span key={skill} className="text-[11px] text-muted-foreground">#{skill}</span>)}</div>{match?.explanation && <p className="mt-3 max-w-2xl text-xs leading-5 text-muted-foreground">{match.explanation}</p>}</div><div className="flex shrink-0 items-start gap-2"><Button variant="ghost" size="icon" onClick={() => void save()} disabled={saving} aria-label={shortlisted ? "Remove from shortlist" : "Save to shortlist"} title={shortlisted ? "Remove from shortlist" : "Save to shortlist"}>{shortlisted ? <Heart className="fill-current text-accent" /> : <Heart />}</Button><Button asChild variant="outline" size="icon" aria-label="Open listing" title="Open listing"><a href={listing.source_url} target="_blank" rel="noreferrer"><ArrowUpRight /></a></Button></div></article>;
 }
 
-function ActivityRow({ item }: { item: Job | (Listing & { job_type: string; status: string }) }) {
-  const isJob = "job_type" in item && item.job_type !== "listing";
-  const title = isJob ? `${item.job_type} job` : item.title;
-  const detail = isJob ? `${item.status} · action queue` : `${item.company} · ${item.extraction_status}`;
-  return <div className="nexus-activity-row"><div className="nexus-time">{formatTime(item.created_at)}</div><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className={`nexus-pill ${isJob ? "nexus-pill-accent" : ""}`}>{isJob ? "Action" : "Listing"}</span><span className="truncate text-sm font-semibold">{title}</span></div><p className="mt-1 truncate text-xs text-muted-foreground">{detail}</p></div><Activity className="size-4 shrink-0 text-muted-foreground" /></div>;
+function ActivityRow({ item }: { item: ActivityItem }) {
+  const isListing = "title" in item;
+  const title = isListing ? item.title : `${item.job_type} job`;
+  const detail = isListing ? `${item.company} · ${item.extraction_status}` : `${item.status} · action queue`;
+  return <div className="nexus-activity-row"><div className="nexus-time">{formatTime(item.created_at)}</div><div className="min-w-0 flex-1"><div className="flex items-center gap-2"><span className={`nexus-pill ${isListing ? "" : "nexus-pill-accent"}`}>{isListing ? "Listing" : "Action"}</span><span className="truncate text-sm font-semibold">{title}</span></div><p className="mt-1 truncate text-xs text-muted-foreground">{detail}</p></div><Activity className="size-4 shrink-0 text-muted-foreground" /></div>;
 }
 
 function EmptyActivity({ onAdd }: { onAdd: () => void }) { return <div className="nexus-empty"><Activity className="size-6 text-primary" /><h3>No activity yet</h3><p>Your normalized listings, matches, and action jobs will appear here.</p><Button variant="outline" size="sm" onClick={onAdd}><Plus /> Add your first listing</Button></div>; }
@@ -373,7 +374,7 @@ function AssistantPanel({ userId, data, onNotice }: { userId: string; data: Work
     updateHistory(nextHistory);
     setQuestion("");
     setAsking(true);
-    const resumeContext = data.resumes.slice(0, 3).map((resume) => ({ fileName: resume.file_name, extractedText: resume.extracted_text.slice(0, 14000) }));
+    const resumeContext = data.resumes.slice(0, 3).map((resume) => ({ fileName: resume.file_name, extractedText: resume.extracted_text?.slice(0, 14000) ?? "" }));
     const response = await fetch("/api/groq", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ action: "chat", question: submittedQuestion, context: { resumes: resumeContext, listings: data.listings.slice(0, 30), matches: data.matches.slice(0, 50), shortlist: data.shortlist, conversation: nextHistory.slice(-8).map(({ role, content }) => ({ role, content })) } }) });
     const payload = await response.json().catch(() => ({}));
     if (!response.ok) {
@@ -385,7 +386,7 @@ function AssistantPanel({ userId, data, onNotice }: { userId: string; data: Work
     }
     setAsking(false);
   };
-  return <aside className="nexus-assistant w-full rounded-xl border border-border bg-surface/40"><div className="border-b border-border px-5 py-5"><p className="nexus-eyebrow">Career assistant</p><h2 className="mt-1 text-sm font-bold uppercase tracking-widest">Nexus AI</h2></div><div className="flex flex-1 flex-col gap-4 p-5"><div className="nexus-message">{data.resumes.length ? `Using ${data.resumes[0].file_name} and your extracted opportunities.` : "Upload a resume and extract a jobs page, then ask about your opportunities."}</div>{history.map((message) => <div key={message.id} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-xl bg-primary px-4 py-3 text-sm text-primary-foreground" : "max-w-[95%] rounded-xl border border-primary/15 bg-primary/5 p-4 text-sm leading-6 text-foreground"}>{message.content}</div>)}{asking && <div className="flex items-center gap-3 rounded-xl border border-primary/15 bg-primary/5 p-4 text-sm text-primary"><RefreshCw className="size-4 animate-spin" /> Thinking…</div>}{history.length === 0 && <div className="rounded-xl border border-primary/15 bg-primary/5 p-4"><p className="nexus-eyebrow">Try asking</p><button className="mt-2 text-left text-xs italic text-foreground" onClick={() => setQuestion("Which roles should I prioritize based on my resume?")}>“Which roles should I prioritize based on my resume?”</button></div>}</div><div className="border-t border-border p-4"><div className="flex items-end gap-2 rounded-lg border border-border bg-background p-2 focus-within:border-primary/50"><Textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void ask(); } }} placeholder="Ask about your resume or jobs..." rows={2} className="min-h-0 resize-none border-0 bg-transparent p-1 text-xs shadow-none focus-visible:ring-0" /><Button size="icon" onClick={() => void ask()} disabled={asking || !question.trim()} aria-label="Ask Nexus" title="Ask Nexus"><Send /></Button></div></div></aside>;
+  return <aside className="nexus-assistant w-full rounded-xl border border-border bg-surface/40"><div className="border-b border-border px-5 py-5"><p className="nexus-eyebrow">Career assistant</p><h2 className="mt-1 text-sm font-bold uppercase tracking-widest">Nexus AI</h2></div><div className="flex flex-1 flex-col gap-4 p-5"><div className="nexus-message">{data.resumes.length ? `Using ${data.resumes[0]?.file_name} and your extracted opportunities.` : "Upload a resume and extract a jobs page, then ask about your opportunities."}</div>{history.map((message) => <div key={message.id} className={message.role === "user" ? "ml-auto max-w-[85%] rounded-xl bg-primary px-4 py-3 text-sm text-primary-foreground" : "max-w-[95%] rounded-xl border border-primary/15 bg-primary/5 p-4 text-sm leading-6 text-foreground"}>{message.content}</div>)}{asking && <div className="flex items-center gap-3 rounded-xl border border-primary/15 bg-primary/5 p-4 text-sm text-primary"><RefreshCw className="size-4 animate-spin" /> Thinking…</div>}{history.length === 0 && <div className="rounded-xl border border-primary/15 bg-primary/5 p-4"><p className="nexus-eyebrow">Try asking</p><button className="mt-2 text-left text-xs italic text-foreground" onClick={() => setQuestion("Which roles should I prioritize based on my resume?")}>“Which roles should I prioritize based on my resume?”</button></div>}</div><div className="border-t border-border p-4"><div className="flex items-end gap-2 rounded-lg border border-border bg-background p-2 focus-within:border-primary/50"><Textarea value={question} onChange={(event) => setQuestion(event.target.value)} onKeyDown={(event) => { if (event.key === "Enter" && !event.shiftKey) { event.preventDefault(); void ask(); } }} placeholder="Ask about your resume or jobs..." rows={2} className="min-h-0 resize-none border-0 bg-transparent p-1 text-xs shadow-none focus-visible:ring-0" /><Button size="icon" onClick={() => void ask()} disabled={asking || !question.trim()} aria-label="Ask Nexus" title="Ask Nexus"><Send /></Button></div></div></aside>;
 }
 
 function IngestDialog({ user, resumes, onClose, onComplete, onNotice }: { user: User; resumes: Resume[]; onClose: () => void; onComplete: () => Promise<void>; onNotice: (message: string) => void }) {
@@ -484,6 +485,7 @@ function saveLocalListing(userId: string, listing: Database["public"]["Tables"][
     scraped_at: listing.scraped_at ?? now,
     created_at: now,
     updated_at: now,
+    user_id: null,
   };
   const listings = getLocalListings(userId).filter((item) => item.source_url !== record.source_url);
   window.localStorage.setItem(localListingsKey(userId), JSON.stringify([record, ...listings]));
@@ -530,7 +532,7 @@ function saveChatHistory(userId: string, history: ChatMessage[]) {
   if (typeof window !== "undefined") window.localStorage.setItem(chatHistoryKey(userId), JSON.stringify(history.slice(-40)));
 }
 function isListingWritePolicyError(message?: string) { return Boolean(message && (/row-level security/i.test(message) || /permission denied/i.test(message))); }
-function getDisplayName(user: User) { return typeof user.user_metadata?.full_name === "string" ? user.user_metadata.full_name : user.email?.split("@")[0] ?? "there"; }
+function getDisplayName(user: User) { return typeof user.user_metadata?.['full_name'] === "string" ? user.user_metadata['full_name'] : user.email?.split("@")[0] ?? "there"; }
 function getInitials(value: string) { return value.split(/\s+/).map((part) => part[0]).join("").slice(0, 2).toUpperCase(); }
 function formatTime(value: string) { return new Intl.DateTimeFormat(undefined, { hour: "2-digit", minute: "2-digit" }).format(new Date(value)); }
 function formatDate(value: string) { return new Intl.DateTimeFormat(undefined, { month: "short", day: "numeric", year: "numeric" }).format(new Date(value)); }
