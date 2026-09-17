@@ -100,6 +100,12 @@ button, input, textarea { font: inherit; }
 .nexus-modal { width: min(100%, 540px); border: 1px solid var(--color-border); border-radius: .9rem; background: var(--color-surface); padding: 1.5rem; box-shadow: 0 24px 80px color-mix(in oklch, var(--color-background) 70%, transparent); }
 .nexus-profile-backdrop { position: fixed; inset: 0; z-index: 50; background: color-mix(in oklch, var(--color-background) 18%, transparent); }
 .nexus-profile-panel { position: absolute; top: 4.5rem; right: 1rem; width: min(calc(100vw - 2rem), 420px); border: 1px solid var(--color-border); border-radius: .9rem; background: var(--color-surface); padding: 1.25rem; box-shadow: 0 24px 80px color-mix(in oklch, var(--color-background) 70%, transparent); }
+.nexus-mobile-nav-backdrop { position: fixed; inset: 4rem 0 0; z-index: 45; background: color-mix(in oklch, var(--color-background) 46%, transparent); backdrop-filter: blur(4px); }
+.nexus-mobile-nav { width: min(290px, calc(100vw - 2rem)); margin: .75rem 1rem; border: 1px solid var(--color-border); border-radius: .8rem; background: var(--color-surface); padding: .75rem; box-shadow: 0 20px 50px color-mix(in oklch, var(--color-background) 72%, transparent); }
+.nexus-mobile-nav-item { display: flex; width: 100%; align-items: center; gap: .75rem; border: 1px solid transparent; border-radius: .55rem; padding: .75rem; color: var(--color-muted-foreground); font-size: .875rem; text-align: left; cursor: pointer; transition: color .18s ease, background-color .18s ease, border-color .18s ease; }
+.nexus-mobile-nav-item svg { width: 17px; height: 17px; }
+.nexus-mobile-nav-item:hover { color: var(--color-foreground); background: var(--color-surface-raised); }
+.nexus-mobile-nav-item.is-active { color: var(--color-primary); background: color-mix(in oklch, var(--color-primary) 13%, transparent); border-color: color-mix(in oklch, var(--color-primary) 32%, transparent); }
 .nexus-auth { position: relative; overflow: hidden; }
 .nexus-auth-grid { position: absolute; inset: 0; opacity: .35; background-image: linear-gradient(to right, color-mix(in oklch, var(--color-border) 40%, transparent) 1px, transparent 1px), linear-gradient(to bottom, color-mix(in oklch, var(--color-border) 40%, transparent) 1px, transparent 1px); background-size: 46px 46px; mask-image: linear-gradient(to bottom, black, transparent 80%); }
 @media (max-width: 1279px) { .nexus-assistant { min-height: 460px; } }

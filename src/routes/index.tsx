@@ -90,6 +90,7 @@ function Index() {
   const [authMode, setAuthMode] = useState<"sign-in" | "sign-up">("sign-in");
   const [data, setData] = useState<WorkspaceData>(emptyWorkspace);
   const [activeView, setActiveView] = useState("overview");
+  const [showMobileNav, setShowMobileNav] = useState(false);
   const [search, setSearch] = useState("");
   const [showIngest, setShowIngest] = useState(false);
   const [showProfile, setShowProfile] = useState(false);
@@ -187,7 +188,7 @@ function Index() {
 
       <main className="flex min-w-0 flex-1 flex-col">
         <header className="nexus-command-bar flex min-h-16 items-center gap-4 border-b border-border px-4 sm:px-6">
-          <button className="nexus-icon-button lg:hidden" onClick={() => setActiveView("overview")} aria-label="Open overview">
+          <button className="nexus-icon-button lg:hidden" onClick={() => setShowMobileNav((open) => !open)} aria-label="Open navigation" aria-expanded={showMobileNav} aria-controls="mobile-navigation">
             <Menu />
           </button>
           <div className="flex min-w-0 flex-1 items-center gap-3 text-muted-foreground">
@@ -204,6 +205,8 @@ function Index() {
             <UserRound />
           </Button>
         </header>
+
+        {showMobileNav && <div className="nexus-mobile-nav-backdrop lg:hidden" onClick={() => setShowMobileNav(false)}><nav id="mobile-navigation" className="nexus-mobile-nav" aria-label="Mobile navigation" onClick={(event) => event.stopPropagation()}><p className="nexus-eyebrow px-3 pb-2 pt-1">Navigate</p>{navItems.map((item) => { const Icon = item.icon; const active = activeView === item.id; return <button key={item.id} className={`nexus-mobile-nav-item ${active ? "is-active" : ""}`} onClick={() => { setActiveView(item.id); setShowMobileNav(false); }}><Icon /><span>{item.label}</span></button>; })}</nav></div>}
 
         <div className="flex min-h-0 flex-1 flex-col xl:flex-row">
           <section className="min-w-0 flex-1 overflow-y-auto p-4 sm:p-6">
